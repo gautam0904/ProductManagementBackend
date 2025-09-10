@@ -1,7 +1,8 @@
 import { DiscountRule } from '../models/discountRule.model.js';
-import type { IDiscountRule } from '../interfaces/model.interface.js';
+import type { ICartItem, IDiscountRule } from '../interfaces/model.interface.js';
 import { MSG, ERROR_MSG } from '../constants/messege.js';
 import { statuscode } from '../constants/status.js';
+import { ApiError } from '../utils/apiError.js';
 
 export class DiscountRuleService {
   
@@ -113,59 +114,6 @@ export class DiscountRuleService {
     };
   }
 
-  async getApplicableRules(cartItems : any, cartTotal: any) {
-    const activeRules = await DiscountRule.find({ 
-      active: true,
-      $or: [
-        { startDate: { $exists: false } },
-        { startDate: { $lte: new Date() } },
-        { endDate: { $exists: false } },
-        { endDate: { $gte: new Date() } }
-      ]
-    }).populate('product category').sort({ priority: -1 });
-
-    const applicableRules = activeRules.filter(rule => {
-      // Check usage limits
-      if (rule.maxUses && rule.currentUses >= rule.maxUses) return false;
-      
-      // Check minimum cart value
-      if (rule.minCartValue && cartTotal < rule.minCartValue) return false;
-      
-      // Check if rule applies to items in cart
-      return this.ruleAppliestoCart(rule, cartItems);
-    });
-
-    return { 
-      statuscode: statuscode.OK, 
-      Content: { 
-        message: MSG.SUCCESS('Applicable rules fetched'), 
-        data: applicableRules 
-      } 
-    };
-  }
-
-  ruleAppliestoCart(rule: any, cartItems: any) {
-    switch (rule.type) {
-      case 'FIXED_AMOUNT':
-        return true; // Cart-wide discount
-        
-      case 'PERCENT_CATEGORY':
-        return cartItems.some((item : any) => 
-          item.product.category && item.product.category.toString() === rule.category.toString()
-        );
-        
-      case 'PERCENT_PRODUCT':
-      case 'BOGO':
-      case 'TWO_FOR_ONE':
-      case 'BUY_X_GET_Y':
-        return cartItems.some((item: any) => 
-          item.product._id.toString() === rule.product.toString()
-        );
-        
-      default:
-        return false;
-    }
-  }
 
   async update(id: any, data: any) {
     // Validate updated configuration if type or key fields changed
@@ -233,13 +181,195 @@ export class DiscountRuleService {
     };
   }
 
-  async incrementUsage(id: any) {
-    const result = await DiscountRule.findByIdAndUpdate(
-      id,
-      { $inc: { currentUses: 1 } },
-      { new: true }
-    );
+
+  async calculateDiscounts(items: ICartItem[]) {
+    const appliedDiscounts = [];
     
-    return result;
+    // Get all active discount rules
+    const rules = await DiscountRule.find({ active: true });
+    
+    // Apply each rule and collect discounts
+    for (const rule of rules) {
+      const discount = await this.applyRule(rule, items);
+      if (discount) {
+        appliedDiscounts.push(discount);
+      }
+    }
+
+    return { appliedDiscounts };
+  }
+
+  private async applyRule(rule: any, items: ICartItem[]) {
+    // Check if rule is currently valid
+    if (!rule.isCurrentlyValid) {
+      return null;
+    }
+
+    // Check minimum cart value requirement
+    const cartTotal = items.reduce((sum, item) => sum + (item.unitPrice * item.qty), 0);
+    if (rule.minCartValue && cartTotal < rule.minCartValue) {
+      return null;
+    }
+
+    let discountAmount = 0;
+    let description = '';
+
+    switch (rule.type) {
+      case 'FIXED_AMOUNT':
+        discountAmount = Math.min(rule.fixedAmount || 0, cartTotal);
+        description = `$${discountAmount} off your order`;
+        break;
+
+      case 'PERCENT_CATEGORY':
+        if (!rule.category) return null;
+        const categoryItems = items.filter(item => 
+          item.product && item.product.toString() === rule.category.toString()
+        );
+        const categoryTotal = categoryItems.reduce((sum, item) => 
+          sum + (item.unitPrice * item.qty), 0
+        );
+        discountAmount = (categoryTotal * (rule.percentage || 0)) / 100;
+        description = `${rule.percentage}% off category items`;
+        break;
+
+      case 'PERCENT_PRODUCT':
+        if (!rule.product) return null;
+        const productItems = items.filter(item => 
+          item.product && item.product.toString() === rule.product.toString()
+        );
+        const productTotal = productItems.reduce((sum, item) => 
+          sum + (item.unitPrice * item.qty), 0
+        );
+        discountAmount = (productTotal * (rule.percentage || 0)) / 100;
+        description = `${rule.percentage}% off product`;
+        break;
+
+      case 'BOGO':
+        const bogoItems = items.filter(item => 
+          (rule.product && item.product && item.product.toString() === rule.product.toString()) ||
+          (rule.category && item.product && item.product.toString() === rule.category.toString())
+        );
+        
+        bogoItems.forEach(item => {
+          const freeItems = Math.floor(item.qty / 2);
+          discountAmount += freeItems * item.unitPrice;
+        });
+        description = 'Buy one, get one free';
+        break;
+
+      case 'TWO_FOR_ONE':
+        const twoForOneItems = items.filter(item => 
+          (rule.product && item.product && item.product.toString() === rule.product.toString()) ||
+          (rule.category && item.product && item.product.toString() === rule.category.toString())
+        );
+        
+        twoForOneItems.forEach(item => {
+          if (item.qty >= 2) {
+            const setsOfTwo = Math.floor(item.qty / 2);
+            discountAmount += setsOfTwo * item.unitPrice;
+          }
+        });
+        description = 'Two for one price';
+        break;
+
+      case 'BUY_X_GET_Y':
+        const buyXGetYItems = items.filter(item => 
+          (rule.product && item.product && item.product.toString() === rule.product.toString()) ||
+          (rule.category && item.product && item.product.toString() === rule.category.toString())
+        );
+        
+        buyXGetYItems.forEach(item => {
+          if (item.qty >= rule.buyQuantity) {
+            const eligibleSets = Math.floor(item.qty / rule.buyQuantity);
+            const freeItems = eligibleSets * rule.getQuantity;
+            discountAmount += Math.min(freeItems, item.qty) * item.unitPrice;
+          }
+        });
+        description = `Buy ${rule.buyQuantity}, get ${rule.getQuantity} free`;
+        break;
+
+      default:
+        return null;
+    }
+
+    // Apply maximum discount limit if set
+    if (rule.maxDiscount && discountAmount > rule.maxDiscount) {
+      discountAmount = rule.maxDiscount;
+    }
+
+    // Check minimum quantity requirement
+    if (rule.minQuantity) {
+      const totalQuantity = items.reduce((sum, item) => sum + item.qty, 0);
+      if (totalQuantity < rule.minQuantity) {
+        return null;
+      }
+    }
+
+    if (discountAmount > 0) {
+      return {
+        ruleId: rule._id,
+        ruleName: rule.name,
+        discountAmount,
+        description
+      };
+    }
+
+    return null;
+  }
+
+  // Get applicable rules for a cart
+  async getApplicableRules(cartItems: any[], cartTotal: number) {
+    try {
+      const rules = await DiscountRule.find({ active: true })
+        .populate('product', 'name price')
+        .populate('category', 'name')
+        .sort({ priority: -1 });
+
+      const applicableRules = rules.filter(rule => {
+        // Check date validity
+        const now = new Date();
+        if (rule.startDate && rule.startDate > now) return false;
+        if (rule.endDate && rule.endDate < now) return false;
+        
+        // Check usage limits
+        if (rule.maxUses && rule.currentUses >= rule.maxUses) return false;
+        
+        // Check minimum cart value
+        if (rule.minCartValue && cartTotal < rule.minCartValue) return false;
+        
+        // Check minimum quantity
+        if (rule.minQuantity) {
+          const totalQuantity = cartItems.reduce((sum, item) => sum + (item.qty || 0), 0);
+          if (totalQuantity < rule.minQuantity) return false;
+        }
+
+        return true;
+      });
+
+      return {
+        statuscode: statuscode.OK,
+        Content: {
+          message: MSG.SUCCESS('Applicable rules retrieved'),
+          data: applicableRules
+        }
+      };
+    } catch (error) {
+      throw new ApiError(
+        statuscode.INTERNALSERVERERROR,
+        error.message || ERROR_MSG.DEFAULT_ERROR
+      );
+    }
+  }
+
+  // Increment usage count for a rule
+  async incrementUsage(ruleId: string) {
+    try {
+      await DiscountRule.findByIdAndUpdate(
+        ruleId,
+        { $inc: { currentUses: 1 } }
+      );
+    } catch (error) {
+      console.error('Error incrementing usage:', error);
+    }
   }
 }

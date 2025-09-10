@@ -94,36 +94,25 @@ export const calculateCartDiscounts = async (req: Request, res: Response) => {
   try {
     const { cartItems, userId } = req.body;
     
+    // Convert cart items to ICartItem format
+    const formattedItems = cartItems.map((item: any) => ({
+      product: item.product?._id || item.productId,
+      qty: item.qty || item.quantity,
+      unitPrice: item.unitPrice || item.product?.price || 0
+    }));
+    
     // Calculate cart total
-    const cartTotal = cartItems.reduce((total: number, item: any) => 
-      total + (item.product.price * item.quantity), 0
+    const cartTotal = formattedItems.reduce((total: number, item: any) => 
+      total + (item.unitPrice * item.qty), 0
     );
     
-    // Get applicable rules
-    const rulesResult = await service.getApplicableRules(cartItems, cartTotal);
-    const applicableRules = rulesResult.Content.data;
+    // Use the service's calculateDiscounts method
+    const discountResult = await service.calculateDiscounts(formattedItems);
+    const appliedDiscounts = discountResult.appliedDiscounts || [];
     
-    let totalDiscount = 0;
-    const appliedDiscounts = [];
-    
-    // Apply discounts based on priority
-    for (const rule of applicableRules) {
-      const discount = calculateRuleDiscount(rule, cartItems, cartTotal);
-      
-      if (discount > 0) {
-        totalDiscount += discount;
-        appliedDiscounts.push({
-          ruleId: rule._id,
-          name: rule.name,
-          type: rule.type,
-          discount: discount,
-          description: getDiscountDescription(rule, discount)
-        });
-        
-        // Increment usage count
-        await service.incrementUsage(rule._id);
-      }
-    }
+    const totalDiscount = appliedDiscounts.reduce((sum: number, discount: any) => 
+      sum + discount.discountAmount, 0
+    );
     
     res.status(200).json({
       message: 'Cart discounts calculated',
@@ -142,75 +131,3 @@ export const calculateCartDiscounts = async (req: Request, res: Response) => {
     });
   }
 };
-
-// Helper functions for discount calculation
-function calculateRuleDiscount(rule: any, cartItems: any, cartTotal: number): number {
-  switch (rule.type) {
-    case 'FIXED_AMOUNT':
-      return Math.min(rule.fixedAmount, cartTotal);
-      
-    case 'PERCENT_CATEGORY':
-      const categoryItems = cartItems.filter((item: any) => 
-        item.product.category && item.product.category.toString() === rule.category.toString()
-      );
-      const categoryTotal = categoryItems.reduce((total: number, item: any) => 
-        total + (item.product.price * item.quantity), 0
-      );
-      return (categoryTotal * rule.percentage) / 100;
-      
-    case 'PERCENT_PRODUCT':
-      const productItems = cartItems.filter((item: any) => 
-        item.product._id.toString() === rule.product.toString()
-      );
-      const productTotal = productItems.reduce((total: number, item: any) => 
-        total + (item.product.price * item.quantity), 0
-      );
-      return (productTotal * rule.percentage) / 100;
-      
-    case 'BOGO':
-      const bogoItems = cartItems.filter((item: any) => 
-        (rule.product && item.product._id.toString() === rule.product.toString()) ||
-        (rule.category && item.product.category && item.product.category.toString() === rule.category.toString())
-      );
-      let bogoDiscount = 0;
-      bogoItems.forEach((item: any) => {
-        const freeItems = Math.floor(item.quantity / 2);
-        bogoDiscount += freeItems * item.product.price;
-      });
-      return bogoDiscount;
-      
-    case 'TWO_FOR_ONE':
-      const twoForOneItems = cartItems.filter((item: any) => 
-        (rule.product && item.product._id.toString() === rule.product.toString()) ||
-        (rule.category && item.product.category && item.product.category.toString() === rule.category.toString())
-      );
-      let twoForOneDiscount = 0;
-      twoForOneItems.forEach((item: any) => {
-        if (item.quantity >= 2) {
-          const setsOfTwo = Math.floor(item.quantity / 2);
-          twoForOneDiscount += setsOfTwo * item.product.price;
-        }
-      });
-      return twoForOneDiscount;
-      
-    default:
-      return 0;
-  }
-}
-
-function getDiscountDescription(rule: any, discount: number): string {
-  switch (rule.type) {
-    case 'FIXED_AMOUNT':
-      return `$${discount} off your order`;
-    case 'PERCENT_CATEGORY':
-      return `${rule.percentage}% off ${rule.category?.name || 'category items'}`;
-    case 'PERCENT_PRODUCT':
-      return `${rule.percentage}% off ${rule.product?.name || 'product'}`;
-    case 'BOGO':
-      return `Buy one, get one free on ${rule.product?.name || rule.category?.name}`;
-    case 'TWO_FOR_ONE':
-      return `Two for one price on ${rule.product?.name || rule.category?.name}`;
-    default:
-      return rule.name;
-  }
-}

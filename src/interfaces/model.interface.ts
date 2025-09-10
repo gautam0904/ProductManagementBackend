@@ -1,3 +1,4 @@
+import type mongoose from "mongoose";
 
 
 export interface Iproduct {
@@ -40,6 +41,7 @@ export interface Icoupon {
 
 // Cart and Order related interfaces
 export interface ICartItem {
+    toObject(): any;
     product: string; // Product ID
     qty: number;
     priceAtAdd?: number; // snapshot price if needed
@@ -89,3 +91,35 @@ export interface Iuser {
     password: string;
     role: 'user' | 'creater' | 'admin';
 }
+
+export interface ICartItem {
+    product: string ;
+    qty: number;
+    unitPrice: number;
+    finalPrice?: number;
+    discount?: number;
+    paidQty?: number;
+    breakdown?: string[];
+  }
+  
+  export interface ICart extends Document {
+    userId: string;
+    items: ICartItem[];
+    createdAt: Date;
+    updatedAt: Date;
+  }
+
+  interface DiscountResult {
+    appliedDiscounts: Array<{
+      ruleId: string;
+      ruleName: string;
+      discountAmount: number;
+      description: string;
+    }>;
+  }
+  
+  interface CartItem {
+    product: string;
+    qty: number;
+    unitPrice: number;
+  }
